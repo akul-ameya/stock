@@ -1,0 +1,21 @@
+USE stockdb;
+
+CREATE TABLE trades (
+    ticker VARCHAR(10),
+    exchange INTEGER,
+    participant_timestamp BIGINT,
+    price REAL,
+    trade_size INTEGER,
+    del_t BIGINT,
+    del_p REAL
+);
+
+LOAD DATA INFILE 'C:/database/deduped_output.csv'
+INTO TABLE trades1
+FIELDS TERMINATED BY ','
+LINES TERMINATED BY '\n'
+IGNORE 1 ROWS;
+
+COPY trades (ticker, exchange, participant_timestamp, price, trade_size, del_t, del_p)
+FROM '/absolute/path/to/deduped_output.csv'
+WITH (FORMAT csv, HEADER true);
