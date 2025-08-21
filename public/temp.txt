@@ -1,1 +1,2 @@
-sudo kill -9 $(sudo lsof -ti:8000)
+sudo chown postgres:postgres /mnt/data/greece-main/public/data/datafiles/output.csv
+sudo chmod 600 /mnt/data/greece-main/public/data/datafiles/output.csv
