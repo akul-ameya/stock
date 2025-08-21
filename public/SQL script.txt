@@ -1,6 +1,4 @@
-USE stockdb;
-
-CREATE TABLE trades (
+CREATE TABLE public.trades (
     ticker VARCHAR(10),
     exchange INTEGER,
     participant_timestamp BIGINT,
@@ -10,12 +8,22 @@ CREATE TABLE trades (
     del_p REAL
 );
 
-LOAD DATA INFILE 'C:/database/deduped_output.csv'
-INTO TABLE trades1
-FIELDS TERMINATED BY ','
-LINES TERMINATED BY '\n'
-IGNORE 1 ROWS;
+COPY public.trades (ticker, exchange, participant_timestamp, price, trade_size, del_t, del_p)
+FROM '/mnt/data/greece-main/public/data/datafiles/sample_output.csv'
+WITH (FORMAT csv, HEADER true);
 
-COPY trades (ticker, exchange, participant_timestamp, price, trade_size, del_t, del_p)
-FROM '/absolute/path/to/deduped_output.csv'
+DROP TABLE public.trades;
+
+CREATE TABLE public.trades (
+    ticker VARCHAR(10),
+    exchange INTEGER,
+    participant_timestamp BIGINT,
+    price REAL,
+    trade_size INTEGER,
+    del_t BIGINT,
+    del_p REAL
+) TABLESPACE bigspace;
+
+COPY public.trades (ticker, exchange, participant_timestamp, price, trade_size, del_t, del_p)
+FROM '/mnt/data/greece-main/public/data/datafiles/output.csv'
 WITH (FORMAT csv, HEADER true);
