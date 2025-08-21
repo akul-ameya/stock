@@ -22,7 +22,7 @@ def load_tunnel_url():
         return ''
 
 tunnel_url = load_tunnel_url()
-allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000", "https://stock-chi-jet.vercel.app"]
 if tunnel_url:
     allowed_origins.extend([tunnel_url, tunnel_url.replace("https://", "http://")])
     print(f"✅ CORS configured with tunnel URL: {tunnel_url}")

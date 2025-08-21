@@ -1,1 +1,1 @@
-lsof -ti:8000 | xargs kill -9
+sudo kill -9 $(sudo lsof -ti:8000)

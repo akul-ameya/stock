@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SCRIPT_DIR="$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TUNNEL_JSON="$SCRIPT_DIR/cf_url.json"
 
 # Function to run git add/commit/push from repo root (one level up from public/)
@@ -51,56 +51,91 @@ git_commit_push() {
   )
 }
 
-# Choose a terminal emulator: prefer gnome-terminal, fall back to xterm
-if command -v gnome-terminal >/dev/null 2>&1; then
-  TERMINAL_CMD="gnome-terminal"
-  # Use -- bash -lc "..." so commands run in bash and the terminal stays open with exec bash
-  START_IN_TERMINAL() { $TERMINAL_CMD -- bash -lc "$1; exec bash" & echo $!; }
-elif command -v xterm >/dev/null 2>&1; then
-  TERMINAL_CMD="xterm"
-  START_IN_TERMINAL() { $TERMINAL_CMD -hold -e "bash -lc \"$1; exec bash\"" & echo $!; }
-else
-  echo "No supported terminal emulator found (gnome-terminal or xterm). Exiting."
-  exit 1
-fi
+# Robust terminal launcher: prefer gnome-terminal.wrapper, gnome-terminal, x-terminal-emulator, fall back to xterm; set TERMINAL_CMD to the chosen emulator and verify the launched PID is alive
+START_IN_TERMINAL() {
+  local cmd="$1"
+  local pid
 
-# Function to start the tunnel in a terminal (run cloudflared as a long-running process and extract URL from its logfile)
-start_tunnel_xterm() {
-  cmd=
-  "LOG=\"$SCRIPT_DIR/cf_tunnel.log\";
-mkdir -p \"$(dirname \"$SCRIPT_DIR/cf_tunnel.log\")\";
-rm -f \"$SCRIPT_DIR/cf_tunnel.log\";
+  for term in gnome-terminal.wrapper gnome-terminal x-terminal-emulator xterm; do
+    if command -v "$term" >/dev/null 2>&1; then
+      case "$term" in
+        gnome-terminal.wrapper|gnome-terminal)
+          "$term" -- bash -lc "$cmd; exec bash" >/dev/null 2>&1 &
+          ;;
+        x-terminal-emulator)
+          "$term" -e "bash -lc '$cmd; exec bash'" >/dev/null 2>&1 &
+          ;;
+        xterm)
+          xterm -hold -e "bash -lc '$cmd; exec bash'" >/dev/null 2>&1 &
+          ;;
+      esac
+      pid=$!
+      sleep 0.5
+      if kill -0 "$pid" 2>/dev/null; then
+        TERMINAL_CMD="$term"
+        echo "$pid"
+        return 0
+      else
+        echo "$term failed to start (or exited quickly), trying next" >&2
+      fi
+    fi
+  done
+
+  return 1
+}
+
+# Write a small worker script that runs inside terminal1. Writing a separate file avoids complex nested quoting
+ensure_tunnel_worker() {
+  WORKER="$SCRIPT_DIR/.cf_tunnel_worker.sh"
+  cat > "$WORKER" <<WORKER
+#!/bin/bash
+LOG="$SCRIPT_DIR/cf_tunnel.log"
+mkdir -p "$SCRIPT_DIR"
+rm -f "\$LOG"
+
 while true; do
-  echo \"Starting Cloudflare tunnel (\$(date))\" >>\"$SCRIPT_DIR/cf_tunnel.log\";
-  # run cloudflared in background so downstream parsing won't kill it
-  cloudflared tunnel --url http://localhost:8000 >>\"$SCRIPT_DIR/cf_tunnel.log\" 2>&1 &
-  CF_PID=\$!;
-  echo \"cloudflared started (pid: \$CF_PID)\" >>\"$SCRIPT_DIR/cf_tunnel.log\";
+  echo "Starting Cloudflare tunnel (\$(date))" >>"\$LOG"
+  # start cloudflared in background so parsing won't kill it
+  cloudflared tunnel --url http://localhost:8000 >>"\$LOG" 2>&1 &
+  CF_PID=\$!
+  echo "cloudflared started (pid: \$CF_PID)" >>"\$LOG"
 
   # wait up to 60s for the published URL to appear in the log, write once when found
   for i in {1..60}; do
-    url=\$(grep -m1 -o 'https://[a-zA-Z0-9.-]*\\.trycloudflare\\.com' \"$SCRIPT_DIR/cf_tunnel.log\" 2>/dev/null || true)
-    if [ -n \"\$url\" ]; then
-      prev=\$(cat \"$TUNNEL_JSON\" 2>/dev/null || true)
-      new=\"{\\\"cf_url\\\":\\\"\$url\\\"}\"
-      if [ \"\$prev\" != \"\$new\" ]; then
-        printf '%s' \"\$new\" > \"$TUNNEL_JSON\";
-        echo \"Wrote $TUNNEL_JSON: \$url\" >>\"$SCRIPT_DIR/cf_tunnel.log\";
+    url=\$(grep -m1 -o 'https://[a-zA-Z0-9.-]*\.trycloudflare\.com' "\$LOG" 2>/dev/null || true)
+    if [ -n "\$url" ]; then
+      prev=\$(cat "$TUNNEL_JSON" 2>/dev/null || true)
+      new="{\"cf_url\":\"\$url\"}"
+      if [ "\$prev" != "\$new" ]; then
+        printf '%s' "\$new" > "$TUNNEL_JSON"
+        echo "Wrote $TUNNEL_JSON: \$url" >>"\$LOG"
       else
-        echo \"URL unchanged; not rewriting $TUNNEL_JSON\" >>\"$SCRIPT_DIR/cf_tunnel.log\";
+        echo "URL unchanged; not rewriting $TUNNEL_JSON" >>"\$LOG"
       fi
-      break;
+      break
     fi
-    sleep 1;
+    sleep 1
   done
 
   # wait for cloudflared to exit; when it does, sleep and restart the loop
-  wait \$CF_PID 2>/dev/null;
-  echo \"cloudflared terminated (\$(date)), restarting in 2 seconds...\" >>\"$SCRIPT_DIR/cf_tunnel.log\";
-  sleep 2;
-done"
-  TUNNEL_XTERM_PID=$(START_IN_TERMINAL "$cmd")
-  echo "Started tunnel terminal (PID: $TUNNEL_XTERM_PID) using $TERMINAL_CMD"
+  wait \$CF_PID 2>/dev/null
+  echo "cloudflared terminated (\$(date)), restarting in 2 seconds..." >>"\$LOG"
+  sleep 2
+done
+WORKER
+  chmod +x "$WORKER"
+}
+
+# Function to start the tunnel in a terminal (runs the worker script in terminal1)
+start_tunnel_xterm() {
+  ensure_tunnel_worker
+  WORKER="$SCRIPT_DIR/.cf_tunnel_worker.sh"
+  TUNNEL_XTERM_PID=$(START_IN_TERMINAL "bash '$WORKER'")
+  if [ -z "$TUNNEL_XTERM_PID" ]; then
+    echo "Failed to start any terminal for cloudflared. Exiting." >&2
+    exit 1
+  fi
+  echo "Started tunnel terminal (PID: $TUNNEL_XTERM_PID) using ${TERMINAL_CMD:-terminal emulator}"
 }
 
 # Function to wait for tunnel_url.json to exist and contain a valid URL
@@ -112,7 +147,12 @@ wait_for_tunnel_url() {
     fi
     sleep 1
   done
-  echo "Tunnel URL not found after waiting."
+  echo "Tunnel URL not found after waiting. Last 30 lines of log (if any):"
+  if [ -f "$SCRIPT_DIR/cf_tunnel.log" ]; then
+    tail -n 30 "$SCRIPT_DIR/cf_tunnel.log" || true
+  else
+    echo "No log file at $SCRIPT_DIR/cf_tunnel.log"
+  fi
   return 1
 }
 
@@ -120,7 +160,7 @@ wait_for_tunnel_url() {
 start_flask_xterm() {
   cmd="python3 app.py"
   FLASK_XTERM_PID=$(START_IN_TERMINAL "$cmd")
-  echo "Started Flask terminal (PID: $FLASK_XTERM_PID) using $TERMINAL_CMD"
+  echo "Started Flask terminal (PID: $FLASK_XTERM_PID) using ${TERMINAL_CMD:-terminal emulator}"
 }
 
 # Function to kill Flask terminal
