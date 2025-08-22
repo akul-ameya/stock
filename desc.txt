@@ -1,0 +1,152 @@
+Project framework description
+
+Below is a concise, complete walkthrough of the whole framework — how things fit together, what each piece does, important behaviors and current limitations.
+
+1) High-level architecture
+- Frontend: Next.js React app (src/pages/...). Runs in browser (hosted on Vercel in your setup). It reads a runtime tunnel URL file (public/cf_url.json) to talk to your local backend over cloudflared, or falls back to localhost for local dev.
+- Backend: Flask app (public/app.py) exposing a small REST API that:
+  - authenticates users (simple login issuing in-memory tokens),
+  - runs queries against a Postgres DB (Trades table),
+  - generates CSV exports to disk,
+  - manages per-user last-file metadata and retention.
+- DB: PostgreSQL, two main tables:
+  - User (id, username, password, is_admin)
+  - Trades (ticker, exchange, participant_timestamp, price, trade_size, del_t, del_p)
+- Tunnel: public/run_tunnel.sh starts cloudflared and writes public/cf_url.json with the trycloudflare URL so the frontend can call your local backend from remote browsers.
+
+2) Authentication & admin permissions
+- /login: POST username/password -> returns token, is_admin, user_id. Token stored in server memory (tokens dict).
+- tokens are ephemeral in memory (cleared on server restart). Backend maps token -> User object.
+- Admin-only endpoints check request.user.is_admin (derived from tokens).
+- Admin pages:
+  - /create-user (frontend) -> calls backend /create-user (POST) — admin required.
+  - /get-users (GET), /delete-user (DELETE), /change-password (POST) require admin token.
+
+3) Frontend pages (important ones)
+- src/pages/user/login.tsx
+  - Login form; stores token + username in localStorage; redirect to query page or admin page on success.
+- src/pages/user/query.tsx (main UI)
+  - Purpose: primary user interface to build queries, preview selections, and export historical trade data as CSV.
+  - Layout: a filters card at the top with multiple columns and controls; action buttons (Export CSV, Reset Filters, Resume Download) below.
+  - Exchanges multi-select:
+    - Freeform multi-input rendered as pills with abbreviations; supports search/autocomplete, keyboard navigation (arrow keys, Enter, Backspace) and removal of pills.
+    - Shows count of selected exchanges in the label when >0.
+  - Date range picker:
+    - Two date picker controls for start and end dates, with min date (2015-07-01) and max date constrained to today.
+    - End date can include full-day range by defaulting to 23:59:59.999999 on selection.
+  - Price and Size ranges:
+    - Numeric inputs for min/max with built-in validation (min ≤ max).
+    - Keyboard increments via ArrowUp/ArrowDown with special handling for small/decimal edge cases.
+  - Equation builder (custom calculations):
+    - Allows up to 5 equations using the keywords PRICE and SIZE, operators (+ - * / ^), and parentheses.
+    - Input is driven by keydown handlers (smart typing) rather than free text: auto-completion of PRICE/SIZE tokens, auto-parentheses behavior for unary minus, prevention of invalid sequences and partial-word edits.
+    - Client-side validation enforces balanced parentheses, no consecutive operators, and completeness of PRICE/SIZE tokens; invalid equations show inline error messages.
+    - Selected equations are shown as removable pills and included in the CSV header as derived columns.
+  - Sort and Aggregate controls:
+    - When no custom equations are provided, a Sort By select is shown with options (time newest/oldest, size, price).
+    - When custom equations are present, an Aggregate By select appears to control time bucketing (ns, ms, s, min, hr, day).
+  - Export flow and modal:
+    - Clicking Export CSV opens a confirmation modal asking whether to reset filters after export (Yes/No) and shows Cancel.
+    - The modal action triggers performDownload which sets isDownloading state, prepares a JSON body reflecting current filters and operations, then initiates the export.
+  - Request payload (what frontend sends to backend):
+    - exchanges (optional array), pricelow, pricehigh, sizelow, sizehigh, datelow (YYYY-MM-DD), datehigh (YYYY-MM-DD), operations: [{ expression }], plus sortby or aggregateby depending on context.
+  - Authorization and headers:
+    - Every export request includes Authorization: Bearer <token> from localStorage. Content-Type: application/json is set for POST /query.
+  - Job handling and download:
+    - POST /query returns either immediate filename (if cached) or a job id/status (future non-blocking flow). Current flow expects a filename JSON and then GETs /download/<filename>.
+    - Download is performed via fetching the file, converting to a Blob and triggering a browser download (createObjectURL + anchor click).
+  - Resume Download:
+    - A Resume Download button calls POST /resume-download (with Authorization). If the backend returns a filename, the frontend downloads it using the same download flow.
+  - UI state and feedback:
+    - isDownloading disables export-related buttons and shows 'Exporting...' where applicable.
+    - Inline error alerts use alert() for failures and display server messages when available.
+    - Buttons are disabled while network operations are in flight to prevent duplicate submissions.
+  - Accessibility and keyboard support:
+    - Inputs and pills support keyboard-only navigation, selection, and deletion. Equation input prevents paste/cut operations to keep tokenized behavior.
+  - Client-side guards:
+    - The frontend validates dates, numeric ranges, equation syntax, and limits (max 5 equations) before sending the request; validation errors surface immediately.
+  - Interactions with backend job system:
+    - The frontend relies on server-supplied filenames and resume endpoint; it includes the token header on all calls so backend maps requests to the stable user key.
+  - Error cases handled:
+    - Network errors, non-OK responses, and JSON parsing errors show user-facing alerts and clear isDownloading state.
+  - Misc UI helpers:
+    - Reset Filters button clears all inputs/pills and restores defaults (sort/aggregate) and focuses inputs appropriately.
+    - The page sets userIsAdmin on load so admin controls (if any) can be conditionally shown.
+- src/pages/admin/create-user.tsx
+  - Admin interface (single-page) that provides full user management functionality. Major elements:
+    - User list table: displays ID, username, is_admin flag, display_type (Root/Admin/User/Self), and actions. The table is loaded from the backend via GET /get-users and is refreshed after mutations.
+    - Create user form: fields for username, password, and optional is_admin checkbox. Submits to POST /create-user with the admin's Authorization header. Form shows inline validation errors returned by the API (e.g., username already exists).
+    - Delete user action: each non-root user row includes a Delete button that calls DELETE /delete-user with the target user_id. The UI requires admin confirmation before calling the API and handles API error responses (forbidden, cannot delete root, etc.). The Delete button is typically disabled for the current admin's own row.
+    - Change password flow: an action (inline or modal) that allows admins to change passwords for other users. It calls POST /change-password with user_id and new_password (and current_password when required). The UI respects rules: root admin can change any password; non-root admins cannot change other admins' passwords.
+    - Client-side authorization: every admin API call includes the stored Bearer token; the page verifies admin status before allowing access and will redirect if the token lacks admin privileges.
+    - UX details: success/failure feedback shown as toasts or inline messages; operations refresh the user list on success; appropriate disabling of buttons while network requests are in flight.
+    - Sorting / presentation: users are ordered with the current admin first, root at top, then admins, then regular users; the UI uses this ordering when rendering the table.
+    - Error handling: handles common errors returned by the server (missing token, invalid token, admin-only, user not found) and surfaces friendly messages to the operator.
+
+4) Backend API routes (key endpoints)
+- POST /login — authenticate and return token, is_admin, user_id.
+- POST /create-user — admin only; create user.
+- GET /get-users — admin only; list users.
+- DELETE /delete-user — admin only.
+- POST /change-password — admin only (with rules).
+- POST /query — main export endpoint:
+  - Computes a server-side job signature: sha256(JSON({user_key, args})) where user_key = "user:<user.id>" (DB id) or 'anon'.
+  - If a done job exists and its file exists → returns success + filename immediately.
+  - If a job with same signature is running/queued → waits (polls) up to 900s for completion and returns its result if finished; otherwise returns 504 (current behavior).
+  - Otherwise writes a meta file for job (status queued) and then acquires a global lock to run generation (serialization: only one generation at a time).
+  - Generation writes CSV to JOB_FILES (job_meta/files) and writes job metadata (meta JSON) with status done/filename.
+- POST /resume-download — returns last generated filename for the authenticated user (if present).
+- GET /download/<filename> — returns the file from JOB_FILES (does NOT delete file on download; deletion happens only via manifest eviction).
+- Other internal helpers: _read_meta/_write_meta, _sig_for_request, _user_key_from_request, _acquire_global_lock/_release_global_lock.
+
+5) CSV generation & retention
+- CSVs are written under public/job_meta/files.
+- File naming: trades_<shortuuid>_<timestamp>.csv
+- Manifest: public/job_meta/user_manifest.json maps at most 5 most-recent users -> their latest filename and timestamp.
+  - Behavior: after a successful generation, _update_user_manifest(user_key, filename) stores entry and trims to the 5 most recent users.
+  - Eviction: any files associated with users that fall out of the top-5 are deleted from disk.
+  - Per-user limit: 1 latest file per user. Global limit: up to 5 users tracked.
+- Important: files are not deleted on download anymore. Files are removed only by manifest eviction logic.
+- Generation method: query built from SQLAlchemy filters (exchanges, price/size, date range, sort), iterated in offset/limit chunks (limit 10,000,000), rows written to CSV. Derived columns (equations) are included in the header; expression evaluation can be done via SQL or fallback evaluation.
+
+6) Job & dedupe behavior (current)
+- Job signature deduplicates identical requests for the same user+args.
+- Duplicate request behavior:
+  - If a duplicate arrives while original is running/queued, the duplicate will poll the meta for up to 900s waiting for done and return the same filename if job finishes in that window; otherwise duplicate returns 504. The original job continues regardless.
+- Queueing/serialization:
+  - New distinct requests create a queued meta and then block on acquiring the single GLOBAL_LOCK; the server processes one generation at a time.
+  - Queued jobs are persisted as meta files and will run once lock is free (no automatic expiry).
+- Currently /query is blocking for the client unless the job already exists; the blocking has the polling 900s behavior for duplicates.
+
+7) public/run_tunnel.sh and cf_url.json
+- public/run_tunnel.sh starts cloudflared and writes the public/cf_url.json with the trycloudflare URL.
+- Frontend code reads cf_url.json at runtime (or falls back to http://localhost:8000). On Vercel you must make cf_url.json available to the Vercel deployment (or set a static URL) for remote clients to reach your local server.
+
+8) Filters, expressions, aggregation (how they map)
+- Filters available in UI: exchanges (multi-select mapped to exchange ids), price low/high, size low/high, date range.
+- Sorting: time newest/oldest, size asc/desc, price asc/desc.
+- Custom equations: use PRICE and SIZE tokens, validated in frontend and translated to SQL-safe expressions server-side (expression_to_sql) or evaluated in Python as fallback.
+- Aggregation: time bucket expression generator get_time_bucket_expression(aggregate_by) used when user requests aggregation.
+
+9) Admin UX and safety
+- Admin-only pages are protected by token checks on frontend and backend.
+- Tokens are ephemeral (in-memory). Admin sessions and tokens will disappear on server restart; consider persistent sessions/JWTs for production.
+
+10) Important limitations & operational notes
+- Long-running queries:
+  - Generation can take hours; /query currently blocks on the server side and will tie up a Flask worker thread. External components (gunicorn worker timeouts, proxies like Cloudflare, browser timeouts) can interrupt the HTTP connection while generation continues server-side.
+  - Duplicate requests wait up to 900s for identical job completion; that 900s timeout is only for duplicate pollers.
+- Concurrency: single global lock means only one heavy job runs at a time; jobs are queued persistently as meta files.
+- Token persistence: tokens dict is in-memory; not robust across restarts.
+- Tunnel config: ensure cf_url.json is available to the deployed frontend (Vercel) if you expect remote browsers to reach your local server.
+- Offset/limit scanning for large tables is inefficient at extreme scale; consider cursor/yield_per or primary-key pagination for huge exports.
+
+11) Behavior summary (typical user flow)
+- User logs in → stores token in localStorage.
+- User configures filters/equations and clicks Export CSV:
+  - Frontend posts JSON to /query (Authorization header).
+  - Backend checks for existing job result, dedupes or enqueues and runs generation (serialized).
+  - When generation completes backend writes CSV to JOB_FILES and updates user_manifest (evicting older users/files if needed).
+  - Frontend receives filename (current flow: server response includes filename), then requests /download/<filename> to fetch the file.
+- If user disconnects while job runs:
+  - The server continues generation. Later user can use "Resume Download" to ask /resume-download for their latest file; if it exists, frontend will fetch /download/<filename>. If file was evicted or never completed, resume returns 404.
