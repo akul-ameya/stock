@@ -48,11 +48,29 @@ const AGGREGATE_OPTIONS = {
 export default function QueryPage() {
   const router = useRouter();
   useUserProtection();
-  let cf_url = '';
-  try {
-    // @ts-ignore
-    cf_url = require('../../../public/cf_url.json').cf_url;
-  } catch {}
+  // Runtime tunnel URL (written by run_tunnel.sh -> public/cf_url.json). We fetch it at runtime
+  // and fall back to localhost for local development. This lets the frontend use the
+  // dynamically-created cloudflared URL without bundling it at build time.
+  const [cfUrl, setCfUrl] = useState<string>('');
+
+  useEffect(() => {
+    let mounted = true;
+    const defaultLocal = 'http://localhost:8000';
+    fetch('/cf_url.json')
+      .then(res => res.json())
+      .then(data => {
+        if (!mounted) return;
+        if (data && data.cf_url) setCfUrl(data.cf_url);
+        else setCfUrl(defaultLocal);
+      })
+      .catch(() => {
+        if (!mounted) return;
+        // fallback to localhost when running locally
+        setCfUrl(defaultLocal);
+      });
+    return () => { mounted = false; };
+  }, []);
+
   // Exchange filtering state
   const [selectedExchanges, setSelectedExchanges] = useState<string[]>([]);
   const [exchangeInput, setExchangeInput] = useState('');
@@ -822,7 +840,8 @@ export default function QueryPage() {
       };
       
       // Request CSV generation
-      const response = await fetch(`${cf_url}/query`, {
+      const base = cfUrl || 'http://localhost:8000';
+      const response = await fetch(`${base}/query`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -842,7 +861,7 @@ export default function QueryPage() {
       }
       
       // Download the generated file
-      const downloadResponse = await fetch(`${cf_url}/download/${result.filename}`, {
+      const downloadResponse = await fetch(`${base}/download/${result.filename}`, {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${localStorage.getItem('token')}`
@@ -854,6 +873,44 @@ export default function QueryPage() {
       }
       
       // Trigger file download
+      const blob = await downloadResponse.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'trades.csv';
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (error) {
+      alert(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+  
+  // Resume download - ask server for last generated filename for this user
+  const handleResumeDownload = async () => {
+    setIsDownloading(true);
+    try {
+      const base = cfUrl || 'http://localhost:8000';
+      const res = await fetch(`${base}/resume-download`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || 'No resumable file found');
+      }
+      const data = await res.json();
+      if (!data.filename) throw new Error('No filename returned');
+
+      // Download the file
+      const downloadResponse = await fetch(`${base}/download/${data.filename}`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      if (!downloadResponse.ok) throw new Error('Error downloading resumed file');
       const blob = await downloadResponse.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -1372,6 +1429,14 @@ export default function QueryPage() {
             disabled={isDownloading}
           >
             Reset Filters
+          </button>
+          <button
+            className="border border-gray-600 text-gray-600 bg-white px-6 py-2 rounded-md font-medium hover:bg-gray-600 hover:text-white focus:ring-2 focus:ring-gray-200 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+            onClick={handleResumeDownload}
+            disabled={isDownloading}
+            title="Resume last generated CSV"
+          >
+            Resume Download
           </button>
         </div>
       </main>
