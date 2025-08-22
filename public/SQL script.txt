@@ -6,7 +6,7 @@ CREATE TABLE public.trades (
     trade_size INTEGER,
     del_t BIGINT,
     del_p REAL
-);
+) TABLESPACE bigspace;
 
 COPY public.trades (ticker, exchange, participant_timestamp, price, trade_size, del_t, del_p)
 FROM '/mnt/data/greece-main/public/data/datafiles/sample_output.csv'
