@@ -11,7 +11,7 @@ Below is a concise, complete walkthrough of the whole framework — how things f
   - manages per-user last-file metadata and retention.
 - DB: PostgreSQL, two main tables:
   - User (id, username, password, is_admin)
-  - Trades (ticker, exchange, participant_timestamp, price, trade_size, dt, dp)
+  - Trades (ticker, exchange, participant_timestamp, price, trade_size, del_t, del_p)
 - Tunnel: public/run_tunnel.sh starts cloudflared and writes public/cf_url.json with the trycloudflare URL so the frontend can call your local backend from remote browsers.
 
 2) Authentication & admin permissions
@@ -38,9 +38,9 @@ Below is a concise, complete walkthrough of the whole framework — how things f
     - Numeric inputs for min/max with built-in validation (min ≤ max).
     - Keyboard increments via ArrowUp/ArrowDown with special handling for small/decimal edge cases.
   - Equation builder (custom calculations):
-    - Allows up to 5 equations using the keywords PRICE, SIZE, DT, and DP, operators (+ - * / ^), and parentheses.
-    - Input is driven by keydown handlers (smart typing) rather than free text: auto-completion of PRICE/SIZE/DT/DP tokens, auto-parentheses behavior for unary minus, prevention of invalid sequences and partial-word edits.
-    - Client-side validation enforces balanced parentheses, no consecutive operators, and completeness of PRICE/SIZE/DT/DP tokens; invalid equations show inline error messages.
+    - Allows up to 5 equations using the keywords PRICE and SIZE, operators (+ - * / ^), and parentheses.
+    - Input is driven by keydown handlers (smart typing) rather than free text: auto-completion of PRICE/SIZE tokens, auto-parentheses behavior for unary minus, prevention of invalid sequences and partial-word edits.
+    - Client-side validation enforces balanced parentheses, no consecutive operators, and completeness of PRICE/SIZE tokens; invalid equations show inline error messages.
     - Selected equations are shown as removable pills and included in the CSV header as derived columns.
   - Sort and Aggregate controls:
     - When no custom equations are provided, a Sort By select is shown with options (time newest/oldest, size, price).
@@ -125,7 +125,7 @@ Below is a concise, complete walkthrough of the whole framework — how things f
 8) Filters, expressions, aggregation (how they map)
 - Filters available in UI: exchanges (multi-select mapped to exchange ids), price low/high, size low/high, date range.
 - Sorting: time newest/oldest, size asc/desc, price asc/desc.
-- Custom equations: use PRICE, SIZE, DT, and DP tokens, validated in frontend and translated to SQL-safe expressions server-side (expression_to_sql) or evaluated in Python as fallback.
+- Custom equations: use PRICE and SIZE tokens, validated in frontend and translated to SQL-safe expressions server-side (expression_to_sql) or evaluated in Python as fallback.
 - Aggregation: time bucket expression generator get_time_bucket_expression(aggregate_by) used when user requests aggregation.
 
 9) Admin UX and safety

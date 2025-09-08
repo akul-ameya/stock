@@ -179,7 +179,7 @@ export default function QueryPage() {
     const trimmedBefore = beforeCursor.trim();
     
     // Block typing inside existing PRICE/SIZE/DT/DP words
-    const wordAtCursor = (beforeCursor + afterCursor).match(/(?:^|[\s\+\-\*\/\^\(])([PDST](?:[RI](?:[IC](?:[CE]?)?)?)?|S(?:I(?:Z(?:E?)?)?)?|D(?:[TP]?)?|P(?:[RI](?:[IC](?:[CE]?)?)?)?)(?=[\s\+\-\*\/\^\)]|$)/);
+    const wordAtCursor = (beforeCursor + afterCursor).match(/(?:^|[\s\+\-\*\/\^\(])([PDSIZ](?:[RPTIC](?:[ICEZ](?:[CE]?)?)?)?|[SZ](?:[IZ](?:[ZE](?:[E]?)?)?)?|D(?:[TP]?))(?=[\s\+\-\*\/\^\)]|$)/);
     if (wordAtCursor) {
       const wordStart = beforeCursor.lastIndexOf(wordAtCursor[1]);
       const wordEnd = wordStart + wordAtCursor[1].length;
@@ -190,7 +190,7 @@ export default function QueryPage() {
     }
     
     // Check for incomplete PRICE/SIZE/DT/DP words
-    const incompleteWordPattern = /(?:^|[\s\+\-\*\/\^\(])([PDST](?:[RI](?:[IC](?:[CE]?)?)?)?|S(?:I(?:Z(?:E?)?)?)?|D(?:[TP]?)?|P(?:[RI](?:[IC](?:[CE]?)?)?)?)$/;
+    const incompleteWordPattern = /(?:^|[\s\+\-\*\/\^\(])([PDSIZ](?:[RPTIC](?:[ICEZ](?:[CE]?)?)?)?|[SZ](?:[IZ](?:[ZE](?:[E]?)?)?)?|D(?:[TP]?)?)$/;
     const incompleteMatch = trimmedBefore.match(incompleteWordPattern);
     const isInIncompleteWord = incompleteMatch && 
       !incompleteMatch[1].endsWith('PRICE') && 
@@ -233,22 +233,9 @@ export default function QueryPage() {
       return true;
     }
     
-    // PRICE word sequence validation and DP validation
-    if (char.toLowerCase() === 'p') {
-      if (lastNonSpaceChar === ')') return false;
-      
-      // Check if it's for DP (after D)
-      if (trimmedBefore.endsWith('D')) return true;
-      
-      // Check if it's for PRICE (start of word)
-      if (cursorPos === 0) return true;
-      if (lastNonSpaceChar === '(') return true;
-      if (/[\+\-\*\/\^]/.test(lastNonSpaceChar)) return true;
-      return false;
-    }
-    
+    // PRICE word sequence validation (R only follows P in PRICE, not DP)
     if (char.toLowerCase() === 'r') {
-      return trimmedBefore.endsWith('P');
+      return trimmedBefore.endsWith('P') && !trimmedBefore.endsWith('DP');
     }
     
     if (char.toLowerCase() === 'i') {
@@ -277,7 +264,7 @@ export default function QueryPage() {
       return trimmedBefore.endsWith('SI');
     }
     
-    // DT word sequence validation
+    // DT/DP word sequence validation
     if (char.toLowerCase() === 'd') {
       if (lastNonSpaceChar === ')') return false;
       
@@ -289,6 +276,19 @@ export default function QueryPage() {
     
     if (char.toLowerCase() === 't') {
       return trimmedBefore.endsWith('D');
+    }
+    
+    if (char.toLowerCase() === 'p') {
+      // P can start PRICE or be the second letter of DP
+      if (trimmedBefore.endsWith('D')) return true;
+      
+      // P starting PRICE
+      if (lastNonSpaceChar === ')') return false;
+      
+      if (cursorPos === 0) return true;
+      if (lastNonSpaceChar === '(') return true;
+      if (/[\+\-\*\/\^]/.test(lastNonSpaceChar)) return true;
+      return false;
     }
     
     // Standard operators (+, *, /, ^)
@@ -375,9 +375,8 @@ export default function QueryPage() {
     if (/P(?:R(?:I(?:C(?:E)?)?)?)?$|S(?:I(?:Z(?:E)?)?)?$|D(?:[TP]?)?$/.test(trimmedBeforeBackspace)) {
       const priceMatch = trimmedBeforeBackspace.match(/(.*?)(P(?:R(?:I(?:C(?:E)?)?)?)?)$/);
       const sizeMatch = trimmedBeforeBackspace.match(/(.*?)(S(?:I(?:Z(?:E)?)?)?)$/);
-      const dtMatch = trimmedBeforeBackspace.match(/(.*?)(D(?:[T]?)?)$/);
-      const dpMatch = trimmedBeforeBackspace.match(/(.*?)(D(?:[P]?)?)$/);
-      const match = priceMatch || sizeMatch || dtMatch || dpMatch;
+      const dtMatch = trimmedBeforeBackspace.match(/(.*?)(D(?:[TP]?)?)$/);
+      const match = priceMatch || sizeMatch || dtMatch;
       
       if (match) {
         const beforeWord = match[1];
@@ -543,12 +542,15 @@ export default function QueryPage() {
     cleanEquation = cleanEquation.replace(/-\(\)/g, '');
     console.log('After cleanup:', JSON.stringify(cleanEquation));
     
-    // Check for incomplete PRICE/SIZE words
+    // Check for incomplete PRICE/SIZE/DT/DP words
     if (/P(?!RICE)|PR(?!ICE)|PRI(?!CE)|PRIC(?!E)/.test(cleanEquation)) {
-      return 'Incomplete word detected. Please complete PRICE or SIZE.';
+      return 'Incomplete word detected. Please complete PRICE, SIZE, DT, or DP.';
     }
     if (/S(?!IZE)|SI(?!ZE)|SIZ(?!E)/.test(cleanEquation)) {
-      return 'Incomplete word detected. Please complete PRICE or SIZE.';
+      return 'Incomplete word detected. Please complete PRICE, SIZE, DT, or DP.';
+    }
+    if (/D(?!T)(?!P)/.test(cleanEquation)) {
+      return 'Incomplete word detected. Please complete PRICE, SIZE, DT, or DP.';
     }
     
     // Validate parentheses balance
@@ -562,7 +564,7 @@ export default function QueryPage() {
     
     // Check for valid operands
     const operands = cleanEquation.split(/[\+\-\*\/\^\(\)]/).filter(part => 
-      part && (part === 'PRICE' || part === 'SIZE' || /^\d+\.?\d*$/.test(part))
+      part && (part === 'PRICE' || part === 'SIZE' || part === 'DT' || part === 'DP' || /^\d+\.?\d*$/.test(part))
     );
     
     if (operands.length <= 1) {
@@ -985,7 +987,7 @@ export default function QueryPage() {
       <main className="w-full max-w-5xl mx-auto pt-28 pb-8 px-4 flex-1">
         {/* Filters Card */}
         <div className="bg-white border border-gray-200 rounded-xl shadow p-6 mb-8">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             
             {/* Exchange Multi-input */}
             <div className="relative">
@@ -1227,7 +1229,7 @@ export default function QueryPage() {
             </div>
 
             {/* Price Range */}
-            <div>
+            {/* <div>
               <label className="block text-xs font-semibold mb-1 text-gray-600">Price Range</label>
               <div className="flex gap-2">
                 <input 
@@ -1326,10 +1328,10 @@ export default function QueryPage() {
                   min="0"
                 />
               </div>
-            </div>
+            </div> */}
 
             {/* Volume Range */}
-            <div>
+            {/* <div>
               <label className="block text-xs font-semibold mb-1 text-gray-600">Size Range</label>
               <div className="flex gap-2">
                 <input 
@@ -1406,7 +1408,7 @@ export default function QueryPage() {
                   min="0"
                 />
               </div>
-            </div>
+            </div> */}
 
             {/* Sort By / Aggregate By */}
             {/* ----modified---- */}

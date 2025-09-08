@@ -12,6 +12,8 @@ import threading
 import hashlib
 import time
 import errno
+import signal
+import sys
 
 # Load tunnel URL from JSON file and set up CORS
 def load_tunnel_url():
@@ -81,7 +83,7 @@ def expression_to_sql(expression):
         # Clean the expression
         expr = expression.upper().strip()
         
-        # Replace PRICE, SIZE, DT, DP with column names
+        # Replace PRICE, SIZE, DT, and DP with column names
         sql_expr = expr.replace('PRICE', 'price').replace('SIZE', 'trade_size').replace('DT', 'dt').replace('DP', 'dp')
         
         # Convert ^ to POWER function for SQL
@@ -103,12 +105,13 @@ def expression_to_sql(expression):
 def evaluate_expression(expression, price, size, dt=None, dp=None):
     """Fallback function for individual row evaluation (should rarely be used now)"""
     try:
-        # Replace PRICE, SIZE, DT, DP with actual values (case insensitive)
+        # Replace PRICE, SIZE, DT, and DP with actual values (case insensitive)
         expr = expression.upper().replace('PRICE', str(price)).replace('SIZE', str(size))
-        if dt is not None:
-            expr = expr.replace('DT', str(dt))
-        if dp is not None:
-            expr = expr.replace('DP', str(dp))
+        
+        # Handle DT and DP - use 0 if None
+        dt_value = dt if dt is not None else 0
+        dp_value = dp if dp is not None else 0
+        expr = expr.replace('DT', str(dt_value)).replace('DP', str(dp_value))
         
         # Validate characters - only allow numbers, operators, parentheses, dots, and spaces
         if not re.match(r'^[0-9+\-*/^().\s]+$', expr):
@@ -611,6 +614,18 @@ def query():
         sortby = data.get('sortby', 'timenew')
         aggregateby = data.get('aggregateby')
 
+        # Debug: print received operations
+        print(f"Received {len(operations)} operations:")
+        for i, op in enumerate(operations):
+            print(f"  Operation {i+1}: expression='{op.get('expression')}'")
+            # Generate and show the column name that will be used
+            column_name = generate_column_name(op.get('expression', ''))
+            print(f"    Generated column name: '{column_name}'")
+        
+        print(f"Aggregation mode: {'Enabled' if aggregateby else 'Disabled'}")
+        if aggregateby:
+            print(f"Aggregate by: {aggregateby}")
+
         datelow = None
         datehigh = None
         if datelow_str:
@@ -677,46 +692,220 @@ def query():
         filepath = os.path.join(JOB_FILES, filename)
 
         try:
-            # (reuse your existing CSV writing logic)
-            # For brevity we stream results in chunks for non-aggregation
+            # Build the SQL query with calculated columns
+            base_columns = [
+                Trades.ticker,
+                Trades.exchange,
+                Trades.participant_timestamp,
+                Trades.price,
+                Trades.trade_size,
+                Trades.dt,
+                Trades.dp
+            ]
+            
+            # Add calculated columns using SQL expressions
+            calculated_expressions = []
+            sql_columns = list(base_columns)
+            
+            for i, operation in enumerate(operations):
+                sql_expr = expression_to_sql(operation['expression'])
+                if sql_expr:
+                    calculated_expressions.append(sql_expr)
+                    # Add the calculated column to the query
+                    sql_columns.append(db.text(f"({sql_expr}) as calc_{i}"))
+                else:
+                    # Mark for Python fallback evaluation
+                    calculated_expressions.append(None)
+            
+            # Determine if we need aggregation
+            if aggregateby and operations:
+                # Aggregation mode
+                time_bucket_expr = get_time_bucket_expression(aggregateby)
+                
+                # Build aggregation query
+                agg_columns = [
+                    db.text(f"({time_bucket_expr}) as time_bucket")
+                ]
+                
+                # Add sum and avg for each derived calculation
+                for i, operation in enumerate(operations):
+                    sql_expr = expression_to_sql(operation['expression'])
+                    if sql_expr:
+                        agg_columns.append(db.text(f"SUM({sql_expr}) as calc_{i}_sum"))
+                        agg_columns.append(db.text(f"SUM({sql_expr}) / SUM(trade_size) as calc_{i}_avg"))
+                    else:
+                        # For fallback expressions, we'll need to handle differently
+                        agg_columns.append(db.text(f"0 as calc_{i}_sum"))
+                        agg_columns.append(db.text(f"0 as calc_{i}_avg"))
+                
+                # Build aggregation query
+                query_obj = db.session.query(*agg_columns)
+                
+                # Apply filters
+                if exchange_ids:
+                    query_obj = query_obj.filter(Trades.exchange.in_(exchange_ids))
+                if pricelow is not None:
+                    query_obj = query_obj.filter(Trades.price >= pricelow)
+                if pricehigh is not None:
+                    query_obj = query_obj.filter(Trades.price <= pricehigh)
+                if sizelow is not None:
+                    query_obj = query_obj.filter(Trades.trade_size >= sizelow)
+                if sizehigh is not None:
+                    query_obj = query_obj.filter(Trades.trade_size <= sizehigh)
+                if datelow is not None:
+                    query_obj = query_obj.filter(Trades.participant_timestamp >= datelow)
+                if datehigh is not None:
+                    query_obj = query_obj.filter(Trades.participant_timestamp <= datehigh)
+                
+                # Group by time bucket
+                query_obj = query_obj.group_by(db.text(f"({time_bucket_expr})"))
+                
+                # Order by time bucket (chronological)
+                query_obj = query_obj.order_by(db.text(f"({time_bucket_expr})"))
+                
+            else:
+                # Non-aggregation mode (original behavior)
+                # Build the query with all columns
+                query_obj = db.session.query(*sql_columns)
+                
+                # Apply filters
+                if exchange_ids:
+                    query_obj = query_obj.filter(Trades.exchange.in_(exchange_ids))
+                if pricelow is not None:
+                    query_obj = query_obj.filter(Trades.price >= pricelow)
+                if pricehigh is not None:
+                    query_obj = query_obj.filter(Trades.price <= pricehigh)
+                if sizelow is not None:
+                    query_obj = query_obj.filter(Trades.trade_size >= sizelow)
+                if sizehigh is not None:
+                    query_obj = query_obj.filter(Trades.trade_size <= sizehigh)
+                if datelow is not None:
+                    query_obj = query_obj.filter(Trades.participant_timestamp >= datelow)
+                if datehigh is not None:
+                    query_obj = query_obj.filter(Trades.participant_timestamp <= datehigh)
+                
+                # Apply sorting
+                if sortby == 'timenew':
+                    query_obj = query_obj.order_by(Trades.participant_timestamp.desc())
+                elif sortby == 'timeold':
+                    query_obj = query_obj.order_by(Trades.participant_timestamp.asc())
+                elif sortby == 'sizedesc':
+                    query_obj = query_obj.order_by(Trades.trade_size.desc())
+                elif sortby == 'sizeasc':
+                    query_obj = query_obj.order_by(Trades.trade_size.asc())
+                elif sortby == 'pricedesc':
+                    query_obj = query_obj.order_by(Trades.price.desc())
+                elif sortby == 'priceasc':
+                    query_obj = query_obj.order_by(Trades.price.asc())
+
             with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile)
+                
                 if aggregateby and operations:
-                    # build aggregation as before (not repeated here for brevity)
-                    # fallback to previous aggregation code path
-                    pass
+                    # Aggregation mode CSV header
+                    header = ['date', 'time']
+                    for operation in operations:
+                        column_name = generate_column_name(operation['expression'])
+                        header.append(f"{column_name}_sum")
+                        header.append(f"{column_name}_avg")
+                    writer.writerow(header)
+                    
+                    # Process aggregated data
+                    trades_chunk = query_obj.all()
+                    
+                    for row in trades_chunk:
+                        # Extract time bucket (first column)
+                        time_bucket = int(row[0])
+                        
+                        # Format timestamp based on aggregation level
+                        timestamp_seconds = time_bucket / 1_000_000_000
+                        dt = datetime.fromtimestamp(timestamp_seconds)
+                        date = dt.strftime('%Y-%m-%d')
+                        
+                        if aggregateby == 'day':
+                            time = '00:00:00'
+                        elif aggregateby == 'hr':
+                            time = dt.strftime('%H:00:00')
+                        elif aggregateby == 'min':
+                            time = dt.strftime('%H:%M:00')
+                        elif aggregateby == 's':
+                            time = dt.strftime('%H:%M:%S')
+                        elif aggregateby == 'ms':
+                            nanoseconds = time_bucket % 1_000_000_000
+                            milliseconds = nanoseconds // 1_000_000
+                            time = dt.strftime('%H:%M:%S') + f'.{milliseconds:03d}'
+                        else:  # ns
+                            nanoseconds = time_bucket % 1_000_000_000
+                            time = dt.strftime('%H:%M:%S') + f'.{nanoseconds:09d}'
+                        
+                        # Build row data
+                        row_data = [date, time]
+                        
+                        # Add sum and avg for each operation
+                        for i in range(len(operations)):
+                            sum_value = row[1 + i * 2] if len(row) > 1 + i * 2 else 0
+                            avg_value = row[2 + i * 2] if len(row) > 2 + i * 2 else 0
+                            row_data.append(round(float(sum_value), 6) if sum_value is not None else 0)
+                            row_data.append(round(float(avg_value), 6) if avg_value is not None else 0)
+                        
+                        writer.writerow(row_data)
                 else:
-                    header = ['ticker', 'exchange', 'date', 'time', 'price', 'size', 'del_t', 'del_p']
+                    # Non-aggregation mode CSV header
+                    header = ['ticker', 'exchange', 'date', 'time', 'price', 'size', 'dt', 'dp']
                     for operation in operations:
                         column_name = generate_column_name(operation['expression'])
                         header.append(column_name)
                     writer.writerow(header)
-
+                    
+                    # Process data in chunks for memory efficiency
                     offset = 0
-                    limit = 10000000
+                    limit = 10000000  # Reduced chunk size for better memory management
+                    
                     while True:
                         chunk_query = query_obj.offset(offset).limit(limit)
                         trades_chunk = chunk_query.all()
                         if not trades_chunk:
                             break
+                        
                         for row in trades_chunk:
-                            # Map row to CSV line (minimal example)
+                            # Extract base columns (first 7 columns now)
                             ticker = row[0]
-                            exch = row[1]
-                            ts = int(row[2])
+                            exchange = row[1] 
+                            participant_timestamp = row[2]
                             price = row[3]
-                            size = row[4]
-                            del_t = row[5]
-                            del_p = row[6]
-                            dt = datetime.fromtimestamp(ts / 1_000_000_000)
-                            date = dt.strftime('%Y-%m-%d')
-                            time_str = dt.strftime('%H:%M:%S')
-                            row_out = [ticker, exch, date, time_str, price, size, del_t, del_p]
-                            # placeholder for calculated expressions
-                            for operation in operations:
-                                row_out.append('')
-                            writer.writerow(row_out)
+                            trade_size = row[4]
+                            dt = row[5]
+                            dp = row[6]
+                            
+                            # Format timestamp
+                            timestamp_seconds = participant_timestamp / 1_000_000_000
+                            dt_datetime = datetime.fromtimestamp(timestamp_seconds)
+                            date = dt_datetime.strftime('%Y-%m-%d')
+                            nanoseconds = participant_timestamp % 1_000_000_000
+                            time = dt_datetime.strftime('%H:%M:%S') + f'.{nanoseconds:09d}'
+                            exchange_code = EXCHANGE_ID_TO_CODE.get(exchange, str(exchange))
+                            
+                            # Build row data
+                            row_data = [ticker, exchange_code, date, time, price, trade_size, dt, dp]
+                            
+                            # Add calculated columns
+                            sql_calc_index = 7  # Start after the base 7 columns
+                            for i, operation in enumerate(operations):
+                                if calculated_expressions[i] is not None:
+                                    # Use SQL-calculated value (next column in result)
+                                    calculated_value = row[sql_calc_index]
+                                    sql_calc_index += 1
+                                    row_data.append(round(float(calculated_value), 6) if calculated_value is not None else 0)
+                                else:
+                                    # Fallback to Python evaluation
+                                    result = evaluate_expression(operation['expression'], price, trade_size, dt, dp)
+                                    row_data.append(result)
+                            
+                            writer.writerow(row_data)
+                        
                         offset += limit
+                        if len(trades_chunk) < limit:
+                            break
 
             # mark meta done
             meta['status'] = 'done'
