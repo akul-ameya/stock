@@ -24,6 +24,7 @@
 /public/data/datafiles/
 /public/data/datafiles/*.csv
 /public/data/datafiles/*.csv.gz
+/public/job_meta/files/*.csv
 
 # misc
 .DS_Store
