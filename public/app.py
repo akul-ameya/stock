@@ -62,8 +62,8 @@ class Trades(db.Model):
     price = db.Column(db.REAL, nullable=False)
     trade_size = db.Column(db.Integer, nullable=False)
     #----modified----
-    del_t = db.Column(db.BigInteger, nullable=True)
-    del_p = db.Column(db.REAL, nullable=True)
+    dt = db.Column(db.BigInteger, nullable=True)
+    dp = db.Column(db.REAL, nullable=True)
     #----modified----
 
 with app.app_context():
@@ -76,13 +76,13 @@ with app.app_context():
     print(user.is_admin)
 
 def expression_to_sql(expression):
-    """Convert a mathematical expression with PRICE/SIZE to SQL"""
+    """Convert a mathematical expression with PRICE/SIZE/DT/DP to SQL"""
     try:
         # Clean the expression
         expr = expression.upper().strip()
         
-        # Replace PRICE and SIZE with column names
-        sql_expr = expr.replace('PRICE', 'price').replace('SIZE', 'trade_size')
+        # Replace PRICE, SIZE, DT, DP with column names
+        sql_expr = expr.replace('PRICE', 'price').replace('SIZE', 'trade_size').replace('DT', 'dt').replace('DP', 'dp')
         
         # Convert ^ to POWER function for SQL
         # Handle power operations: convert a^b to POWER(a,b)
@@ -100,11 +100,15 @@ def expression_to_sql(expression):
         print(f"Error converting expression to SQL: {e}")
         return None
 
-def evaluate_expression(expression, price, size):
+def evaluate_expression(expression, price, size, dt=None, dp=None):
     """Fallback function for individual row evaluation (should rarely be used now)"""
     try:
-        # Replace PRICE and SIZE with actual values (case insensitive)
+        # Replace PRICE, SIZE, DT, DP with actual values (case insensitive)
         expr = expression.upper().replace('PRICE', str(price)).replace('SIZE', str(size))
+        if dt is not None:
+            expr = expr.replace('DT', str(dt))
+        if dp is not None:
+            expr = expr.replace('DP', str(dp))
         
         # Validate characters - only allow numbers, operators, parentheses, dots, and spaces
         if not re.match(r'^[0-9+\-*/^().\s]+$', expr):
@@ -638,8 +642,8 @@ def query():
             Trades.participant_timestamp,
             Trades.price,
             Trades.trade_size,
-            Trades.del_t,
-            Trades.del_p
+            Trades.dt,
+            Trades.dp
         )
         if exchange_ids:
             query_obj = query_obj.filter(Trades.exchange.in_(exchange_ids))

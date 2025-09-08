@@ -63,7 +63,7 @@ export default function UserLogin() {
           {/* Header */}
           <div className="text-center mb-8">
             <h1 className="text-2xl font-extrabold tracking-tight text-blue-800 mb-2">
-              Historical Data Portal
+              Historical Stock Market Data Portal
             </h1>
             <h2 className="text-lg font-semibold text-gray-700">User Login</h2>
             <p className="text-sm text-gray-500 mt-2">

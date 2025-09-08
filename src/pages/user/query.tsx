@@ -178,8 +178,8 @@ export default function QueryPage() {
     const lastNonSpaceChar = beforeCursor.replace(/\s+$/, '').slice(-1);
     const trimmedBefore = beforeCursor.trim();
     
-    // Block typing inside existing PRICE/SIZE words
-    const wordAtCursor = (beforeCursor + afterCursor).match(/(?:^|[\s\+\-\*\/\^\(])([PS](?:[RI](?:[IC](?:[CE]?)?)?)?|S(?:I(?:Z(?:E?)?)?)?)(?=[\s\+\-\*\/\^\)]|$)/);
+    // Block typing inside existing PRICE/SIZE/DT/DP words
+    const wordAtCursor = (beforeCursor + afterCursor).match(/(?:^|[\s\+\-\*\/\^\(])([PDST](?:[RI](?:[IC](?:[CE]?)?)?)?|S(?:I(?:Z(?:E?)?)?)?|D(?:[TP]?)?|P(?:[RI](?:[IC](?:[CE]?)?)?)?)(?=[\s\+\-\*\/\^\)]|$)/);
     if (wordAtCursor) {
       const wordStart = beforeCursor.lastIndexOf(wordAtCursor[1]);
       const wordEnd = wordStart + wordAtCursor[1].length;
@@ -189,18 +189,21 @@ export default function QueryPage() {
       }
     }
     
-    // Check for incomplete PRICE/SIZE words
-    const incompleteWordPattern = /(?:^|[\s\+\-\*\/\^\(])([PS](?:[RI](?:[IC](?:[CE]?)?)?)?|S(?:I(?:Z(?:E?)?)?)?)$/;
+    // Check for incomplete PRICE/SIZE/DT/DP words
+    const incompleteWordPattern = /(?:^|[\s\+\-\*\/\^\(])([PDST](?:[RI](?:[IC](?:[CE]?)?)?)?|S(?:I(?:Z(?:E?)?)?)?|D(?:[TP]?)?|P(?:[RI](?:[IC](?:[CE]?)?)?)?)$/;
     const incompleteMatch = trimmedBefore.match(incompleteWordPattern);
     const isInIncompleteWord = incompleteMatch && 
       !incompleteMatch[1].endsWith('PRICE') && 
-      !incompleteMatch[1].endsWith('SIZE');
+      !incompleteMatch[1].endsWith('SIZE') &&
+      !incompleteMatch[1].endsWith('DT') &&
+      !incompleteMatch[1].endsWith('DP');
     
     // Space handling - prevent breaking words and invalid placements
     if (char === ' ') {
       if (cursorPos === 0) return false;
       if (/[P][R]?[I]?[C]?$/.test(trimmedBefore) && !trimmedBefore.endsWith('PRICE')) return false;
       if (/[S][I]?[Z]?$/.test(trimmedBefore) && !trimmedBefore.endsWith('SIZE')) return false;
+      if (/[D][TP]?$/.test(trimmedBefore) && !trimmedBefore.endsWith('DT') && !trimmedBefore.endsWith('DP')) return false;
       if (/\d\.$/.test(beforeCursor.replace(/\s/g, ''))) return false;
       if (/\d$/.test(beforeCursor.replace(/\s/g, '')) && /^\d/.test(afterCursor.replace(/\s/g, ''))) return false;
       return true;
@@ -230,10 +233,14 @@ export default function QueryPage() {
       return true;
     }
     
-    // PRICE word sequence validation
+    // PRICE word sequence validation and DP validation
     if (char.toLowerCase() === 'p') {
       if (lastNonSpaceChar === ')') return false;
       
+      // Check if it's for DP (after D)
+      if (trimmedBefore.endsWith('D')) return true;
+      
+      // Check if it's for PRICE (start of word)
       if (cursorPos === 0) return true;
       if (lastNonSpaceChar === '(') return true;
       if (/[\+\-\*\/\^]/.test(lastNonSpaceChar)) return true;
@@ -270,12 +277,28 @@ export default function QueryPage() {
       return trimmedBefore.endsWith('SI');
     }
     
+    // DT word sequence validation
+    if (char.toLowerCase() === 'd') {
+      if (lastNonSpaceChar === ')') return false;
+      
+      if (cursorPos === 0) return true;
+      if (lastNonSpaceChar === '(') return true;
+      if (/[\+\-\*\/\^]/.test(lastNonSpaceChar)) return true;
+      return false;
+    }
+    
+    if (char.toLowerCase() === 't') {
+      return trimmedBefore.endsWith('D');
+    }
+    
     // Standard operators (+, *, /, ^)
     if (/[\+\*\/\^]/.test(char)) {
       if (isInIncompleteWord) return false;
       
       if (/PRICE$/.test(trimmedBefore)) return true;
       if (/SIZE$/.test(trimmedBefore)) return true;
+      if (/DT$/.test(trimmedBefore)) return true;
+      if (/DP$/.test(trimmedBefore)) return true;
       if (/\d$/.test(trimmedBefore)) return true;
       if (lastNonSpaceChar === ')') return true;
       return false;
@@ -293,6 +316,8 @@ export default function QueryPage() {
       // Binary minus positions
       if (/PRICE$/.test(trimmedBefore)) return true;
       if (/SIZE$/.test(trimmedBefore)) return true;
+      if (/DT$/.test(trimmedBefore)) return true;
+      if (/DP$/.test(trimmedBefore)) return true;
       if (/\d$/.test(trimmedBefore)) return true;
       if (lastNonSpaceChar === ')') return true;
       
@@ -346,11 +371,13 @@ export default function QueryPage() {
       }
     }
     
-    // Handle backspacing partial or complete PRICE/SIZE words (high priority)
-    if (/P(?:R(?:I(?:C(?:E)?)?)?)?$|S(?:I(?:Z(?:E)?)?)?$/.test(trimmedBeforeBackspace)) {
+    // Handle backspacing partial or complete PRICE/SIZE/DT/DP words (high priority)
+    if (/P(?:R(?:I(?:C(?:E)?)?)?)?$|S(?:I(?:Z(?:E)?)?)?$|D(?:[TP]?)?$/.test(trimmedBeforeBackspace)) {
       const priceMatch = trimmedBeforeBackspace.match(/(.*?)(P(?:R(?:I(?:C(?:E)?)?)?)?)$/);
       const sizeMatch = trimmedBeforeBackspace.match(/(.*?)(S(?:I(?:Z(?:E)?)?)?)$/);
-      const match = priceMatch || sizeMatch;
+      const dtMatch = trimmedBeforeBackspace.match(/(.*?)(D(?:[T]?)?)$/);
+      const dpMatch = trimmedBeforeBackspace.match(/(.*?)(D(?:[P]?)?)$/);
+      const match = priceMatch || sizeMatch || dtMatch || dpMatch;
       
       if (match) {
         const beforeWord = match[1];
@@ -932,7 +959,7 @@ export default function QueryPage() {
       {/* Navigation Bar */}
       <nav className="fixed top-0 left-0 w-full bg-white/90 backdrop-blur border-b border-gray-200 shadow z-10 flex items-center justify-between px-8 py-3">
         <div className="flex items-center gap-2">
-          <span className="text-xl font-extrabold tracking-tight text-blue-800">Historical Data</span>
+          <span className="text-xl font-extrabold tracking-tight text-blue-800">Historical Stock Market Data</span>
         </div>
         <div className="flex gap-2">
           {userIsAdmin && (
@@ -1131,7 +1158,7 @@ export default function QueryPage() {
                 </p>
               ) : (
                 <p className="text-xs text-gray-500 mt-1">
-                  Use PRICE and SIZE as variables. Operators: +, -, *, /, ^. Parentheses auto-created.
+                  Use PRICE, SIZE, DT, and DP as variables. Operators: +, -, *, /, ^. Parentheses auto-created.
                 </p>
               )}
             </div>
